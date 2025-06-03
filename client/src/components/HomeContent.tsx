@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Line, Bar } from "react-chartjs-2";
+import { Line, Bar, Doughnut } from "react-chartjs-2";
 import FFT from 'fft.js';
 import zoomPlugin from 'chartjs-plugin-zoom';
 import annotationPlugin from 'chartjs-plugin-annotation';
@@ -10,6 +10,7 @@ import {
   PointElement,
   LineElement,
   BarElement,
+  ArcElement,
   Title,
   Tooltip,
   Legend,
@@ -23,6 +24,7 @@ ChartJS.register(
   PointElement,
   LineElement,
   BarElement,
+  ArcElement,
   Title,
   Tooltip,
   Legend,
@@ -47,8 +49,29 @@ interface PredictionResult {
     rocCurve: { x: number; y: number }[];
     classMetrics: Array<{ class: string; precision: number; recall: number }>;
   };
-  class_probabilities?: Record<string, string>;
+  class_probabilities?: Record<string, number>;
   formatted_signals?: Record<string, string>;
+}
+
+interface MonitoringResponse {
+  status: string;
+  error?: string;
+  timestamp: number | null;
+  prediction: {
+    state: string;
+    confidence: number;
+    details: {
+      class_probabilities: Record<string, number>;
+      validation_patterns: Record<string, boolean>;
+    };
+  } | null;
+  signals: Record<string, number[]>;
+  metrics: {
+    f1Score: number;
+    confusionMatrix: number[][];
+    rocCurve: Array<{ x: number; y: number }>;
+    classMetrics: Array<{ class: string; precision: number; recall: number }>;
+  };
 }
 
 function findDominantFrequencies(frequencies: number[], magnitudes: number[], threshold = 0.3): Array<{ freq: number, magnitude: number }> {
@@ -128,13 +151,122 @@ function calculateFFT(signal: number[]): { frequencies: number[]; magnitudes: nu
 }
 
 function HomeContent() {
+  const [monitoringData, setMonitoringData] = useState<MonitoringResponse | null>(null);
   const [prediction, setPrediction] = useState<PredictionResult | null>(null);
   const [uploadedData, setUploadedData] = useState<{[key: string]: number[]} | null>(null);
   const [dominantFreqs, setDominantFreqs] = useState<{[key: string]: Array<{ freq: number, magnitude: number }>}>({});
   const [interpretations, setInterpretations] = useState<{[key: string]: string[]}>({});
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [isMonitoring, setIsMonitoring] = useState<boolean>(false);
+  const [monitoringInterval, setMonitoringInterval] = useState<number | null>(null);
   const { addNotification } = useNotifications();
+
+  const fetchMonitoringStatus = async () => {
+    try {
+      const response = await fetch("http://localhost:5600/get-monitoring-status");
+      const data: MonitoringResponse = await response.json();
+      
+      console.log("Monitoring status response:", data);
+      
+      if (data.status === "error") {
+        setError(data.error || "Unknown error occurred");
+        return;
+      }
+
+      if (data.status === "waiting") {
+        // Still waiting for data, keep the loading state
+        return;
+      }
+
+      if (data.status === "stopped") {
+        setIsMonitoring(false);
+        if (monitoringInterval) {
+          clearInterval(monitoringInterval);
+          setMonitoringInterval(null);
+        }
+        return;
+      }
+
+      if (data.status === "running" && data.prediction) {
+        setMonitoringData(data);
+        // Update prediction state with the monitoring data
+        setPrediction({
+          prediction: data.prediction.state,
+          confidence: data.prediction.confidence,
+          status: "success",
+          metrics: data.metrics,
+          class_probabilities: data.prediction.details.class_probabilities
+        });
+        setError(null);
+      }
+    } catch (error) {
+      console.error("Error fetching monitoring status:", error);
+      setError("Failed to fetch monitoring status");
+    }
+  };
+
+  const startMonitoring = async () => {
+    try {
+      setError(null); // Clear any previous errors
+      const response = await fetch("http://localhost:5600/start-monitoring", {
+        method: "POST",
+      });
+      
+      if (response.ok) {
+        setIsMonitoring(true);
+        setPrediction(null); // Reset prediction when starting new monitoring
+        // Start polling for updates
+        const interval = setInterval(fetchMonitoringStatus, 5000);
+        setMonitoringInterval(interval);
+      } else {
+        const data = await response.json();
+        setError(data.error || "Failed to start monitoring");
+      }
+    } catch (error) {
+      console.error("Error starting monitoring:", error);
+      setError("Failed to start monitoring");
+    }
+  };
+
+  const stopMonitoring = async () => {
+    try {
+      const response = await fetch("http://localhost:5600/stop-monitoring", {
+        method: "POST",
+      });
+      
+      if (response.ok) {
+        setIsMonitoring(false);
+        setPrediction(null); // Clear prediction when stopping
+        if (monitoringInterval) {
+          clearInterval(monitoringInterval);
+          setMonitoringInterval(null);
+        }
+      } else {
+        const data = await response.json();
+        setError(data.error || "Failed to stop monitoring");
+      }
+    } catch (error) {
+      console.error("Error stopping monitoring:", error);
+      setError("Failed to stop monitoring");
+    }
+  };
+
+  // Add immediate fetch when monitoring starts
+  useEffect(() => {
+    if (isMonitoring) {
+      fetchMonitoringStatus();
+    }
+  }, [isMonitoring]);
+
+  // Cleanup effect
+  useEffect(() => {
+    return () => {
+      if (monitoringInterval) {
+        clearInterval(monitoringInterval);
+      }
+    };
+  }, []);
 
   const generateMatFile = async () => {
     try {
@@ -312,15 +444,17 @@ function HomeContent() {
               accept=".mat,.npz"
               onChange={handleFileUpload}
               className="hidden"
-              disabled={isLoading}
+              disabled={isLoading || isMonitoring}
             />
           </label>
           <button
-            onClick={generateMatFile}
-            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+            onClick={isMonitoring ? stopMonitoring : startMonitoring}
+            className={`${
+              isMonitoring ? 'bg-red-500 hover:bg-red-700' : 'bg-blue-500 hover:bg-blue-700'
+            } text-white font-bold py-2 px-4 rounded`}
             disabled={isLoading}
           >
-            Générer fichier .mat
+            {isMonitoring ? 'Arrêter monitoring' : 'Démarrer monitoring'}
           </button>
         </div>
       </div>
@@ -332,13 +466,144 @@ function HomeContent() {
         </div>
       )}
 
-      {!uploadedData && (
+      {!uploadedData && !isMonitoring && (
         <div className="text-center p-8 bg-gray-50 rounded-lg">
           <p className="text-xl text-gray-600">Téléchargez votre fichier de signal pour commencer l'analyse</p>
         </div>
       )}
 
-      {uploadedData && (
+      {/* Monitoring Mode Display */}
+      {isMonitoring && (
+        <div className="bg-white rounded-lg shadow p-6">
+          <h2 className="text-xl font-semibold mb-4">État de la Machine en Temps Réel</h2>
+          {monitoringData?.prediction ? (
+            <div className="grid grid-cols-2 gap-6">
+              {/* State Display */}
+              <div className="p-6 border rounded-lg">
+                <div className="text-center">
+                  <h3 className="text-lg font-medium mb-2">État Actuel</h3>
+                  <div className={`text-3xl font-bold mb-2 ${
+                    monitoringData.prediction.details.class_probabilities['sain'] >= 0.4 ? 'text-green-600' :
+                    monitoringData.prediction.details.class_probabilities['desiquilibre'] >= 0.4 ? 'text-yellow-600' :
+                    monitoringData.prediction.details.class_probabilities['cassure'] >= 0.4 ? 'text-red-600' :
+                    'text-gray-600'
+                  }`}>
+                    {monitoringData.prediction.details.class_probabilities['sain'] >= 0.4 ? 'NORMAL' :
+                     monitoringData.prediction.details.class_probabilities['desiquilibre'] >= 0.4 ? 'ATTENTION' :
+                     monitoringData.prediction.details.class_probabilities['cassure'] >= 0.4 ? 'DÉFAUT CRITIQUE' :
+                     'INCONNU'}
+                  </div>
+                  <div className="text-sm text-gray-600">
+                    État: {monitoringData.prediction.details.class_probabilities['sain'] >= 0.4 ? 'Normal' :
+                          monitoringData.prediction.details.class_probabilities['desiquilibre'] >= 0.4 ? 'Déséquilibre' :
+                          monitoringData.prediction.details.class_probabilities['cassure'] >= 0.4 ? 'Cassure' :
+                          'Inconnu'}
+                  </div>
+                  <div className="text-sm text-gray-600">
+                    Confiance: {(Math.max(...Object.values(monitoringData.prediction.details.class_probabilities)) * 100).toFixed(1)}%
+                  </div>
+                </div>
+              </div>
+
+              {/* State Gauge Chart */}
+              <div className="p-6 border rounded-lg">
+                <div className="h-64">
+                  <Doughnut
+                    data={{
+                      labels: ['Normal (Sain)', 'Attention (Déséquilibre)', 'Critique (Cassure)'],
+                      datasets: [{
+                        data: [
+                          (monitoringData.prediction.details.class_probabilities['sain'] || 0) * 100,
+                          (monitoringData.prediction.details.class_probabilities['desiquilibre'] || 0) * 100,
+                          (monitoringData.prediction.details.class_probabilities['cassure'] || 0) * 100
+                        ],
+                        backgroundColor: [
+                          'rgba(34, 197, 94, 0.8)',  // green
+                          'rgba(234, 179, 8, 0.8)',   // yellow
+                          'rgba(239, 68, 68, 0.8)',   // red
+                        ],
+                        borderColor: [
+                          'rgba(34, 197, 94, 1)',
+                          'rgba(234, 179, 8, 1)',
+                          'rgba(239, 68, 68, 1)',
+                        ],
+                        borderWidth: 1,
+                      }]
+                    }}
+                    options={{
+                      responsive: true,
+                      maintainAspectRatio: false,
+                      cutout: '70%',
+                      rotation: -90,
+                      circumference: 180,
+                      plugins: {
+                        legend: {
+                          position: 'bottom',
+                          labels: {
+                            padding: 20,
+                            font: {
+                              size: 12
+                            }
+                          }
+                        },
+                        title: {
+                          display: true,
+                          text: 'État de Santé',
+                          font: {
+                            size: 16,
+                            weight: 'bold'
+                          }
+                        },
+                        tooltip: {
+                          callbacks: {
+                            label: function(context) {
+                              return `${context.label}: ${context.parsed.toFixed(1)}%`;
+                            }
+                          }
+                        }
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Class Probabilities */}
+              <div className="col-span-2 p-6 border rounded-lg">
+                <h3 className="text-lg font-medium mb-4">Probabilités par État</h3>
+                <div className="grid grid-cols-3 gap-4">
+                  {Object.entries(monitoringData.prediction.details.class_probabilities).map(([className, probability]) => (
+                    <div key={className} className="text-center">
+                      <div className="text-lg font-bold">{(probability * 100).toFixed(1)}%</div>
+                      <div className="text-sm text-gray-600">{className}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Validation Patterns */}
+              <div className="col-span-2 p-6 border rounded-lg">
+                <h3 className="text-lg font-medium mb-4">Caractéristiques du Signal</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  {Object.entries(monitoringData.prediction.details.validation_patterns).map(([pattern, isPresent]) => (
+                    <div key={pattern} className="flex items-center space-x-2">
+                      <div className={`w-3 h-3 rounded-full ${isPresent ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                      <span>{pattern}: {isPresent ? 'Présent' : 'Absent'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center p-8">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+              <p className="text-gray-600">En attente des données...</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Regular File Upload Display */}
+      {!isMonitoring && uploadedData && (
         <div className="grid grid-cols-1 gap-6">
           {/* Signal Plots */}
           <div className="bg-white rounded-lg shadow p-6">

@@ -11,6 +11,8 @@
     "start": "vite"
   },
   "dependencies": {
+    "@react-pdf/render": "^4.3.0",
+    "@react-pdf/renderer": "^4.3.0",
     "@tailwindcss/vite": "^4.1.7",
     "axios": "^1.9.0",
     "chart.js": "^4.4.9",
