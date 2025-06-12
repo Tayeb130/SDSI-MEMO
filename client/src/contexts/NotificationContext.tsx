@@ -42,39 +42,85 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   const addNotification = async (event: Event) => {
     try {
-      // Only create notification for NORMAL, MOYEN, or ÉLEVÉ severity
-      if (event.severity !== 'FAIBLE') {
-        const response = await fetch('http://localhost:5000/api/notifications', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ eventId: event._id }),
-        });
-
-        if (response.ok) {
-          const newNotification = await response.json();
-          setNotifications(prev => [newNotification.data, ...prev]);
-          setUnreadCount(prev => prev + 1);
-
-          // Show browser notification if permission is granted
-          if (Notification.permission === 'granted') {
-            const severityText = {
-              'ÉLEVÉ': '⚠️ Critique',
-              'MOYEN': '⚠️ Moyen',
-              'NORMAL': 'ℹ️ Normal'
-            }[event.severity] || '';
-            
-            new Notification(`Nouvel événement détecté - ${severityText}`, {
-              body: `Fichier: ${event.fileName}\nSévérité: ${event.severity}`,
-              icon: '/gear.svg'
-            });
-          }
-        }
+      console.log('Adding notification for event:', event);
+      
+      if (!event._id || !event.severity) {
+        console.error('Invalid event data:', event);
+        return;
       }
+
+      // Create notification directly with the event data
+      const notificationResponse = await fetch('http://localhost:5000/api/notifications', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          eventId: event._id,
+          severity: event.severity,
+          message: getNotificationMessage(event.severity),
+          details: event.description || [],
+          read: false
+        }),
+      });
+
+      if (!notificationResponse.ok) {
+        throw new Error('Failed to create notification');
+      }
+
+      const newNotification = await notificationResponse.json();
+      console.log('Notification created:', newNotification);
+
+      // Update local state with the new notification
+      if (newNotification.success && newNotification.data) {
+        setNotifications(prev => [newNotification.data, ...prev]);
+        setUnreadCount(prev => prev + 1);
+
+        // Handle browser notifications
+        await showBrowserNotification(event);
+      }
+
     } catch (error) {
-      console.error('Error adding notification:', error);
+      console.error('Error creating notification:', error);
     }
+  };
+
+  // Helper function to get notification message
+  const getNotificationMessage = (severity: string): string => {
+    switch (severity) {
+      case 'ÉLEVÉ':
+        return '⚠️ Défaut critique détecté';
+      case 'MOYEN':
+        return '⚡ Anomalie détectée';
+      case 'NORMAL':
+        return 'ℹ️ État normal';
+      default:
+        return 'Notification';
+    }
+  };
+
+  // Helper function to show browser notification
+  const showBrowserNotification = async (event: Event) => {
+    if (Notification.permission !== 'granted') {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') return;
+    }
+
+    const severityEmoji = {
+      'ÉLEVÉ': '🔴',
+      'MOYEN': '🟡',
+      'NORMAL': '🟢',
+      'FAIBLE': '⚪',
+    }[event.severity] || '⚪';
+
+    // Using only valid NotificationOptions properties
+    new Notification(`${severityEmoji} ${getNotificationMessage(event.severity)}`, {
+      body: `Fichier: ${event.fileName}\nType: ${event.type}`,
+      icon: '/gear.svg',
+      tag: event._id,
+      requireInteraction: true, // Use this instead of renotify
+      silent: false
+    });
   };
 
   const markAsRead = async (id: string) => {
@@ -138,4 +184,4 @@ export function useNotifications() {
     throw new Error('useNotifications must be used within a NotificationProvider');
   }
   return context;
-} 
+}
